@@ -12,6 +12,7 @@ COPY EDSR_x2.pb .
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY config.py .
 COPY app.py .
 COPY tasks.py .
 COPY test_app.py .
