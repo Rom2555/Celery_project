@@ -1,30 +1,39 @@
 import os
+import sys
+import logging
 import cv2
 import numpy as np
 import redis
 from celery import Celery
+from config import Config
+
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Инициализация Celery
-REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
 celery = Celery(
     'tasks',
-    broker=f'redis://{REDIS_HOST}:6379/0',
-    backend=f'redis://{REDIS_HOST}:6379/0'
+    broker=f'redis://{Config.REDIS_HOST}:{Config.REDIS_PORT}/0',
+    backend=f'redis://{Config.REDIS_HOST}:{Config.REDIS_PORT}/0'
 )
 
-print("Загрузка модели EDSR_x2...")
-MODEL_PATH = os.environ.get('MODEL_PATH', 'EDSR_x2.pb')
-print(f"Загрузка модели {MODEL_PATH}...")
+redis_client = redis.StrictRedis(host=Config.REDIS_HOST, port=Config.REDIS_PORT, db=0)
+
+# Проверка есть ли модель
+MODEL_PATH = Config.MODEL_PATH
+if not os.path.exists(MODEL_PATH):
+    logger.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Файл модели '{MODEL_PATH}' не найден!")
+    logger.critical("Воркер не может быть запущен без модели. Завершение работы.")
+    sys.exit(1)
+
+logger.info(f"Загрузка модели {MODEL_PATH}...")
 scaler = cv2.dnn_superres.DnnSuperResImpl_create()
 scaler.readModel(MODEL_PATH)
 scaler.setModel("edsr", 2)
-print("EDSR_x2 модель успешно загружена.")
+logger.info("Модель EDSR_x2 успешно загружена.")
 
-# Клиент Redis для сохранения результата
-redis_client = redis.StrictRedis(host=REDIS_HOST, port=6379, db=0)
-
-
-@celery.task(bind=True)
+@celery.task(bind=True, name='tasks.upscale_task')
 def upscale_task(self, img_bytes):
     """ Работа с байтами в оперативной памяти. """
     try:
@@ -35,7 +44,6 @@ def upscale_task(self, img_bytes):
         if image is None:
             raise ValueError("Неверные данные изображения")
 
-        # Ваша логика апскейла
         result = scaler.upsample(image)
 
         # Кодируем обратно в байты (аналог cv2.imwrite, но в память)
@@ -45,9 +53,8 @@ def upscale_task(self, img_bytes):
 
         img_out_bytes = encoded_img.tobytes()
 
-        # Сохраняем обработанное изображение в Redis с TTL 1 час (3600 сек)
-        ttl_seconds = int(os.environ.get('IMAGE_TTL', 3600))
-        redis_client.setex(f"processed_{self.request.id}", ttl_seconds, img_out_bytes)
+        # Используем TTL из конфига
+        redis_client.setex(f"processed_{self.request.id}", Config.IMAGE_TTL, img_out_bytes)
 
         return True
     except Exception as e:
